@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: webrtc-video-call
+    env: node
+    region: singapore  # or oregon, frankfurt, etc.
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+    healthCheckPath: /api/health
+    autoDeploy: true
