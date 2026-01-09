@@ -26,6 +26,12 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/webrtc
 console.log(`🚀 Environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
 console.log(`🔗 MongoDB URI: ${MONGODB_URI ? MONGODB_URI.replace(/mongodb(\+srv)?:\/\/(.*):(.*)@/, 'mongodb$1://***:***@') : 'Not set'}`);
 
+// Fix for Render: Trust proxy
+if (isProduction) {
+    app.set('trust proxy', 1);
+    console.log('✅ Trust proxy enabled for Render');
+}
+
 // Socket.io configuration for Render
 const io = socketIo(server, {
     cors: {
@@ -56,13 +62,17 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(__dirname));
 
-// Rate limiting
+// Rate limiting - FIXED for Render
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: isProduction ? 200 : 1000,
     message: 'Too many requests from this IP, please try again later.',
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+        // Use IP from Render's proxy
+        return req.ip;
+    }
 });
 app.use('/api/', limiter);
 
@@ -85,9 +95,6 @@ mongoose.connect(MONGODB_URI, {
 .catch(err => {
     console.error('❌ MongoDB Atlas connection failed:', err.message);
     console.error('💡 Check your MONGODB_URI environment variable in Render dashboard');
-    if (isProduction) {
-        console.error('⚠️ Running in limited mode - database features disabled');
-    }
 });
 
 // User Schema
@@ -136,43 +143,44 @@ const onlineUsers = new Map(); // socket.id -> {username, userId}
 const userSockets = new Map(); // username -> socket.id
 const activeCalls = new Map(); // username -> {with: username, type: 'video'|'audio'}
 
-// Improved Authentication Middleware
-const authenticateToken = async (req, res, next) => {
+// Session check endpoint (public)
+app.post('/api/check-session', async (req, res) => {
     try {
         // Get token from Authorization header or cookies
-        const authHeader = req.headers['authorization'];
-        const token = authHeader && authHeader.startsWith('Bearer ') 
-            ? authHeader.split(' ')[1] 
-            : req.cookies?.token;
+        let token = req.headers.authorization?.split(' ')[1];
+        
+        if (!token && req.cookies && req.cookies.token) {
+            token = req.cookies.token;
+        }
         
         if (!token) {
-            return res.status(401).json({ 
+            return res.json({ 
                 success: false, 
-                message: 'No authentication token provided' 
+                message: 'No session token' 
             });
         }
         
         // Check if MongoDB is connected
         if (mongoose.connection.readyState !== 1) {
-            return res.status(503).json({ 
+            return res.json({ 
                 success: false, 
-                message: 'Database temporarily unavailable' 
+                message: 'Database not connected' 
             });
         }
         
         const tokenDoc = await Token.findOne({ token }).populate('userId');
         
         if (!tokenDoc) {
-            return res.status(401).json({ 
+            return res.json({ 
                 success: false, 
-                message: 'Invalid or expired session' 
+                message: 'Session not found' 
             });
         }
         
         // Check if token is expired
         if (tokenDoc.expiresAt < new Date()) {
             await Token.deleteOne({ _id: tokenDoc._id });
-            return res.status(401).json({ 
+            return res.json({ 
                 success: false, 
                 message: 'Session expired' 
             });
@@ -182,17 +190,31 @@ const authenticateToken = async (req, res, next) => {
         tokenDoc.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
         await tokenDoc.save();
         
-        req.user = tokenDoc.userId;
-        req.token = token;
-        next();
+        const user = await User.findById(tokenDoc.userId._id);
+        
+        // Set cookie for future requests
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: isProduction,
+            sameSite: isProduction ? 'none' : 'lax',
+            maxAge: 24 * 60 * 60 * 1000,
+            path: '/'
+        });
+        
+        res.json({ 
+            success: true, 
+            message: 'Session valid',
+            username: user.username,
+            token: token
+        });
     } catch (error) {
-        console.error('Authentication error:', error);
-        res.status(500).json({ 
+        console.error('Session check error:', error);
+        res.json({ 
             success: false, 
-            message: 'Authentication failed' 
+            message: 'Session check failed' 
         });
     }
-};
+});
 
 // Routes
 app.post('/api/register', async (req, res) => {
@@ -218,14 +240,6 @@ app.post('/api/register', async (req, res) => {
             return res.status(400).json({ 
                 success: false, 
                 message: 'Password must be at least 6 characters' 
-            });
-        }
-        
-        // Check database connection
-        if (mongoose.connection.readyState !== 1) {
-            return res.status(503).json({ 
-                success: false, 
-                message: 'Database not available. Please try again.' 
             });
         }
         
@@ -299,14 +313,6 @@ app.post('/api/login', async (req, res) => {
             });
         }
         
-        // Check database connection
-        if (mongoose.connection.readyState !== 1) {
-            return res.status(503).json({ 
-                success: false, 
-                message: 'Database not available. Please try again.' 
-            });
-        }
-        
         // Find user by username or email
         const user = await User.findOne({
             $or: [
@@ -355,7 +361,8 @@ app.post('/api/login', async (req, res) => {
             httpOnly: true,
             secure: isProduction,
             sameSite: isProduction ? 'none' : 'lax',
-            maxAge: 24 * 60 * 60 * 1000
+            maxAge: 24 * 60 * 60 * 1000,
+            path: '/'
         });
         
         res.json({ 
@@ -373,74 +380,23 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Public session check (no authentication required)
-app.post('/api/check-session', async (req, res) => {
-    try {
-        const token = req.headers.authorization?.split(' ')[1] || req.cookies?.token;
-        
-        if (!token) {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'No session token' 
-            });
-        }
-        
-        if (mongoose.connection.readyState !== 1) {
-            return res.status(200).json({ 
-                success: false, 
-                message: 'Database not connected' 
-            });
-        }
-        
-        const tokenDoc = await Token.findOne({ token }).populate('userId');
-        
-        if (!tokenDoc) {
-            return res.status(200).json({ 
-                success: false, 
-                message: 'Session not found' 
-            });
-        }
-        
-        if (tokenDoc.expiresAt < new Date()) {
-            await Token.deleteOne({ _id: tokenDoc._id });
-            return res.status(200).json({ 
-                success: false, 
-                message: 'Session expired' 
-            });
-        }
-        
-        // Update expiry
-        tokenDoc.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        await tokenDoc.save();
-        
-        const user = await User.findById(tokenDoc.userId._id);
-        
-        res.json({ 
-            success: true, 
-            message: 'Session valid',
-            username: user.username,
-            token: token
-        });
-    } catch (error) {
-        console.error('Session check error:', error);
-        res.status(200).json({ 
-            success: false, 
-            message: 'Session check failed' 
-        });
-    }
-});
-
 app.post('/api/logout', async (req, res) => {
     try {
-        const token = req.headers.authorization?.split(' ')[1] || req.cookies?.token;
+        let token = req.headers.authorization?.split(' ')[1];
         
-        if (token && mongoose.connection.readyState === 1) {
+        if (!token && req.cookies && req.cookies.token) {
+            token = req.cookies.token;
+        }
+        
+        if (token) {
             await Token.deleteOne({ token });
             console.log(`👋 User logged out`);
         }
         
         // Clear cookie
-        res.clearCookie('token');
+        res.clearCookie('token', {
+            path: '/'
+        });
         
         res.json({ 
             success: true, 
@@ -456,15 +412,6 @@ app.post('/api/logout', async (req, res) => {
 
 app.get('/api/users', async (req, res) => {
     try {
-        // If database not connected, return empty list
-        if (mongoose.connection.readyState !== 1) {
-            return res.json({ 
-                success: true, 
-                users: [],
-                message: 'Database not connected'
-            });
-        }
-        
         const users = await User.find({})
             .select('username lastSeen createdAt')
             .sort({ lastSeen: -1 })
@@ -513,17 +460,21 @@ app.get('*', (req, res) => {
 // Socket.io Middleware
 io.use(async (socket, next) => {
     try {
-        const token = socket.handshake.auth.token;
+        let token = socket.handshake.auth.token;
+        
+        // Try to get token from cookies if not in auth
+        if (!token && socket.handshake.headers.cookie) {
+            const cookies = socket.handshake.headers.cookie.split(';').reduce((acc, cookie) => {
+                const [key, value] = cookie.trim().split('=');
+                acc[key] = value;
+                return acc;
+            }, {});
+            token = cookies.token;
+        }
         
         if (!token) {
             console.log('Socket connection rejected: No token provided');
             return next(new Error('Authentication required'));
-        }
-        
-        // Check database connection
-        if (mongoose.connection.readyState !== 1) {
-            console.log('Socket connection rejected: Database not connected');
-            return next(new Error('Database not available'));
         }
         
         const tokenDoc = await Token.findOne({ token }).populate('userId');
@@ -570,35 +521,62 @@ io.on('connection', (socket) => {
     userSockets.set(socket.username, socket.id);
     
     // Update last seen in database
-    if (mongoose.connection.readyState === 1) {
-        User.findByIdAndUpdate(socket.userId, { 
-            lastSeen: new Date()
-        }).exec();
-    }
+    User.findByIdAndUpdate(socket.userId, { 
+        lastSeen: new Date()
+    }).exec();
     
     // Broadcast updated users list
     broadcastUsersList();
     
-    // Call Offer
-    socket.on('call-offer', ({ to, offer, callType }) => {
+    // WebRTC Events
+    socket.on('call-offer', async ({ to, offer, callType }) => {
         console.log(`📞 Call offer from ${socket.username} to ${to} (${callType})`);
         
-        // Check if target is in a call
-        if (activeCalls.has(to)) {
-            socket.emit('call-busy', { from: to });
+        // Check if already in a call
+        if (activeCalls.has(socket.username)) {
+            console.log(`⚠️ ${socket.username} is already in a call`);
+            socket.emit('call-error', { message: 'You are already in a call' });
             return;
         }
         
         const targetSocketId = userSockets.get(to);
         if (!targetSocketId) {
+            console.log(`⚠️ ${to} is offline`);
             socket.emit('call-error', { message: 'User is offline' });
             return;
         }
         
-        // Mark as in call
-        activeCalls.set(socket.username, { with: to, type: callType });
+        // Check if target is in a call
+        if (activeCalls.has(to)) {
+            console.log(`⚠️ ${to} is busy in another call`);
+            socket.emit('call-busy', { from: to });
+            return;
+        }
         
-        // Forward offer
+        // Mark caller as in call
+        activeCalls.set(socket.username, { 
+            with: to, 
+            type: callType,
+            timestamp: Date.now(),
+            status: 'calling'
+        });
+        
+        // Broadcast updated users list
+        broadcastUsersList();
+        
+        // Forward offer with timeout
+        const offerTimeout = setTimeout(() => {
+            if (activeCalls.get(socket.username)?.status === 'calling') {
+                console.log(`⏰ Call offer timeout for ${socket.username} to ${to}`);
+                socket.emit('call-error', { message: 'Call timed out - no response' });
+                activeCalls.delete(socket.username);
+                broadcastUsersList();
+            }
+        }, 30000); // 30 second timeout
+        
+        // Store timeout reference
+        socket.offerTimeout = offerTimeout;
+        
         io.to(targetSocketId).emit('call-offer', {
             from: socket.username,
             offer: offer,
@@ -606,19 +584,34 @@ io.on('connection', (socket) => {
             timestamp: Date.now()
         });
         
-        // Broadcast updated users list
-        broadcastUsersList();
+        console.log(`📤 Call offer sent to ${to}`);
     });
     
-    // Call Answer
     socket.on('call-answer', ({ to, answer }) => {
         console.log(`✅ Call answer from ${socket.username} to ${to}`);
         
+        // Clear any pending offer timeout
+        if (socket.offerTimeout) {
+            clearTimeout(socket.offerTimeout);
+            socket.offerTimeout = null;
+        }
+        
         const targetSocketId = userSockets.get(to);
         if (targetSocketId) {
-            // Mark both as in call
-            activeCalls.set(to, { with: socket.username, type: 'video' });
-            activeCalls.set(socket.username, { with: to, type: 'video' });
+            // Update call status for both users
+            activeCalls.set(to, { 
+                with: socket.username, 
+                type: 'video',
+                timestamp: Date.now(),
+                status: 'connected'
+            });
+            
+            activeCalls.set(socket.username, { 
+                with: to, 
+                type: 'video',
+                timestamp: Date.now(),
+                status: 'connected'
+            });
             
             io.to(targetSocketId).emit('call-answer', {
                 from: socket.username,
@@ -628,10 +621,11 @@ io.on('connection', (socket) => {
             
             // Broadcast updated users list
             broadcastUsersList();
+            
+            console.log(`📞 Call connected: ${socket.username} <-> ${to}`);
         }
     });
     
-    // ICE Candidate
     socket.on('ice-candidate', ({ to, candidate }) => {
         const targetSocketId = userSockets.get(to);
         if (targetSocketId) {
@@ -642,9 +636,14 @@ io.on('connection', (socket) => {
         }
     });
     
-    // Call Rejected
     socket.on('call-rejected', ({ to }) => {
         console.log(`❌ Call rejected by ${socket.username}`);
+        
+        // Clear any pending offer timeout
+        if (socket.offerTimeout) {
+            clearTimeout(socket.offerTimeout);
+            socket.offerTimeout = null;
+        }
         
         const targetSocketId = userSockets.get(to);
         if (targetSocketId) {
@@ -662,7 +661,6 @@ io.on('connection', (socket) => {
         broadcastUsersList();
     });
     
-    // Call Ended
     socket.on('call-ended', ({ to }) => {
         console.log(`📴 Call ended by ${socket.username}`);
         
@@ -682,8 +680,9 @@ io.on('connection', (socket) => {
         broadcastUsersList();
     });
     
-    // Call Error
     socket.on('call-error', ({ to, message }) => {
+        console.log(`❌ Call error from ${socket.username}: ${message}`);
+        
         const targetSocketId = userSockets.get(to);
         if (targetSocketId) {
             io.to(targetSocketId).emit('call-error', { 
@@ -712,6 +711,11 @@ io.on('connection', (socket) => {
     socket.on('disconnect', (reason) => {
         console.log(`❌ User disconnected: ${socket.username} (${reason})`);
         
+        // Clear any pending timeouts
+        if (socket.offerTimeout) {
+            clearTimeout(socket.offerTimeout);
+        }
+        
         // Remove from online users
         onlineUsers.delete(socket.id);
         userSockets.delete(socket.username);
@@ -731,11 +735,6 @@ io.on('connection', (socket) => {
             activeCalls.delete(callInfo.with);
         }
         
-        // Clean up token if database is connected
-        if (socket.token && mongoose.connection.readyState === 1) {
-            Token.deleteOne({ token: socket.token }).catch(console.error);
-        }
-        
         // Broadcast updated users list
         broadcastUsersList();
     });
@@ -749,7 +748,8 @@ function broadcastUsersList() {
             username: user.username,
             isOnline: true,
             inCall: !!callInfo,
-            callType: callInfo?.type || null
+            callType: callInfo?.type || null,
+            callStatus: callInfo?.status || null
         };
     });
     
@@ -758,45 +758,23 @@ function broadcastUsersList() {
 
 // Clean up expired tokens
 setInterval(async () => {
-    if (mongoose.connection.readyState === 1) {
-        try {
-            const result = await Token.deleteMany({
-                expiresAt: { $lt: new Date() }
-            });
-            if (result.deletedCount > 0) {
-                console.log(`🧹 Cleaned up ${result.deletedCount} expired tokens`);
-            }
-        } catch (error) {
-            console.error('Token cleanup error:', error);
+    try {
+        const result = await Token.deleteMany({
+            expiresAt: { $lt: new Date() }
+        });
+        if (result.deletedCount > 0) {
+            console.log(`🧹 Cleaned up ${result.deletedCount} expired tokens`);
         }
+    } catch (error) {
+        console.error('Token cleanup error:', error);
     }
 }, 60 * 60 * 1000); // Run every hour
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received. Closing server gracefully...');
-    
-    // Update all users as offline
-    if (mongoose.connection.readyState === 1) {
-        User.updateMany({}, { 
-            lastSeen: new Date()
-        }).exec();
-    }
-    
-    server.close(() => {
-        console.log('HTTP server closed');
-        mongoose.connection.close(false, () => {
-            console.log('MongoDB connection closed');
-            process.exit(0);
-        });
-    });
-});
 
 // Start server
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📡 Environment: ${isProduction ? 'production' : 'development'}`);
-    console.log(`🌐 WebSocket: ${isProduction ? 'wss://' : 'ws://'}${isProduction ? 'your-app.onrender.com' : 'localhost:' + PORT}`);
+    console.log(`🌐 WebSocket: ${isProduction ? 'wss://' : 'ws://'}${isProduction ? 'videocallapp-kld0.onrender.com' : 'localhost:' + PORT}`);
     console.log(`📊 MongoDB: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
     console.log('='.repeat(50));
     console.log('✅ Server is ready!');
