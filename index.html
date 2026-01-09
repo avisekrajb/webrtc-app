@@ -775,991 +775,889 @@
 
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script>
-        // ==================== Configuration ====================
-        const CONFIG = {
-            ICE_SERVERS: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' },
-                { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' },
-                { 
-                    urls: 'turn:global.relay.metered.ca:80',
-                    username: 'c6feb1e19473cfe946ee0d7f',
-                    credential: 'uIAX1o/+oD7R6f7G'
-                },
-                { 
-                    urls: 'turn:global.relay.metered.ca:443',
-                    username: 'c6feb1e19473cfe946ee0d7f',
-                    credential: 'uIAX1o/+oD7R6f7G'
-                },
-                { 
-                    urls: 'turn:global.relay.metered.ca:443?transport=tcp',
-                    username: 'c6feb1e19473cfe946ee0d7f',
-                    credential: 'uIAX1o/+oD7R6f7G'
+      // ==================== Configuration ====================
+const CONFIG = {
+    ICE_SERVERS: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
+    ]
+};
+
+// ==================== DOM Elements ====================
+const authSection = document.getElementById('authSection');
+const profileSection = document.getElementById('profileSection');
+const videoContainer = document.getElementById('videoContainer');
+const usersList = document.getElementById('usersList');
+const currentUserSpan = document.getElementById('currentUser');
+const onlineCountSpan = document.getElementById('onlineCount');
+const localVideo = document.getElementById('localVideo');
+const remoteVideo = document.getElementById('remoteVideo');
+const loginStatus = document.getElementById('loginStatus');
+const registerStatus = document.getElementById('registerStatus');
+const registerRequired = document.getElementById('registerRequired');
+const incomingCallModal = document.getElementById('incomingCallModal');
+const outgoingCallModal = document.getElementById('outgoingCallModal');
+const callerNameSpan = document.getElementById('callerName');
+const calleeNameSpan = document.getElementById('calleeName');
+const ringTimerSpan = document.getElementById('ringTimer');
+const remoteUserNameSpan = document.getElementById('remoteUserName');
+const callStatusDiv = document.getElementById('callStatus');
+const callDurationSpan = document.getElementById('callDuration');
+const connectionStatusDiv = document.getElementById('connectionStatus');
+const connectionTextSpan = document.getElementById('connectionText');
+const connectionDot = document.querySelector('.connection-dot');
+const userStatusBadge = document.getElementById('userStatus');
+
+// ==================== Global State ====================
+let socket = null;
+let currentUser = null;
+let peerConnection = null;
+let localStream = null;
+let remoteStream = null;
+let screenStream = null;
+let isCaller = false;
+let currentCall = null;
+let sessionToken = null;
+let incomingCallData = null;
+let ringTimerInterval = null;
+let callTimerInterval = null;
+let ringTimeoutId = null;
+let callTimeoutId = null;
+let audioContext = null;
+let oscillator = null;
+let isCallWithVideo = true;
+let isAudioEnabled = true;
+let isVideoEnabled = true;
+let isScreenSharing = false;
+let callStartTime = null;
+let isFullscreen = false;
+
+// ==================== Initialization ====================
+document.addEventListener('DOMContentLoaded', () => {
+    console.log('🌐 WebRTC Video Call Application');
+    checkSession();
+    updateConnectionStatus('disconnected');
+});
+
+// ==================== Audio Functions ====================
+function initAudioContext() {
+    try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+        console.warn('Web Audio API not supported');
+    }
+}
+
+function playRingtone() {
+    stopRingtone();
+    
+    if (audioContext && audioContext.state === 'suspended') {
+        audioContext.resume();
+    }
+    
+    if (audioContext) {
+        try {
+            oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+            
+            gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+            gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.1);
+            gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.5);
+            
+            oscillator.start();
+            
+            setInterval(() => {
+                if (oscillator) {
+                    const now = audioContext.currentTime;
+                    gainNode.gain.setValueAtTime(0, now);
+                    gainNode.gain.linearRampToValueAtTime(0.3, now + 0.1);
+                    gainNode.gain.linearRampToValueAtTime(0, now + 0.5);
                 }
-            ],
-            RECONNECT_DELAY: 3000,
-            MAX_RECONNECT_ATTEMPTS: 5,
-            RING_TIMEOUT: 30000,
-            CALL_TIMEOUT: 60000
-        };
-
-        // ==================== DOM Elements ====================
-        const authSection = document.getElementById('authSection');
-        const profileSection = document.getElementById('profileSection');
-        const videoContainer = document.getElementById('videoContainer');
-        const usersList = document.getElementById('usersList');
-        const currentUserSpan = document.getElementById('currentUser');
-        const onlineCountSpan = document.getElementById('onlineCount');
-        const localVideo = document.getElementById('localVideo');
-        const remoteVideo = document.getElementById('remoteVideo');
-        const loginStatus = document.getElementById('loginStatus');
-        const registerStatus = document.getElementById('registerStatus');
-        const registerRequired = document.getElementById('registerRequired');
-        const incomingCallModal = document.getElementById('incomingCallModal');
-        const outgoingCallModal = document.getElementById('outgoingCallModal');
-        const callerNameSpan = document.getElementById('callerName');
-        const calleeNameSpan = document.getElementById('calleeName');
-        const ringTimerSpan = document.getElementById('ringTimer');
-        const remoteUserNameSpan = document.getElementById('remoteUserName');
-        const callStatusDiv = document.getElementById('callStatus');
-        const callDurationSpan = document.getElementById('callDuration');
-        const connectionStatusDiv = document.getElementById('connectionStatus');
-        const connectionTextSpan = document.getElementById('connectionText');
-        const connectionDot = document.querySelector('.connection-dot');
-        const userStatusBadge = document.getElementById('userStatus');
-
-        // ==================== Global State ====================
-        let socket = null;
-        let currentUser = null;
-        let peerConnection = null;
-        let localStream = null;
-        let remoteStream = null;
-        let screenStream = null;
-        let isCaller = false;
-        let currentCall = null;
-        let sessionToken = null;
-        let incomingCallData = null;
-        let outgoingCallData = null;
-        let ringTimerInterval = null;
-        let callTimerInterval = null;
-        let ringTimeoutId = null;
-        let callTimeoutId = null;
-        let audioContext = null;
-        let oscillator = null;
-        let isCallWithVideo = true;
-        let isAudioEnabled = true;
-        let isVideoEnabled = true;
-        let isScreenSharing = false;
-        let reconnectAttempts = 0;
-        let callStartTime = null;
-        let isFullscreen = false;
-
-        // ==================== Initialization ====================
-        document.addEventListener('DOMContentLoaded', () => {
-            console.log('🌐 WebRTC Video Call Application');
-            console.log('🔧 ICE Servers configured:', CONFIG.ICE_SERVERS.length);
-            console.log('📡 HTTPS Support:', window.location.protocol === 'https:');
-            console.log('🔒 Secure Context:', window.isSecureContext);
+            }, 1000);
             
-            checkSession();
-            initAudioContext();
-            updateConnectionStatus('disconnected');
-            
-            // Show connection info
-            console.log('Server URL:', window.location.origin);
-            console.log('WebSocket URL:', window.location.origin.replace('http', 'ws'));
-            
-            if (window.location.protocol === 'https:') {
-                console.log('✅ HTTPS detected - WebRTC will work properly');
-            } else {
-                console.warn('⚠️ HTTP detected - Some features may not work without HTTPS');
-            }
+        } catch (e) {
+            console.warn('Error playing ringtone');
+        }
+    }
+}
+
+function stopRingtone() {
+    if (oscillator) {
+        oscillator.stop();
+        oscillator = null;
+    }
+}
+
+// ==================== Session Management ====================
+async function checkSession() {
+    const token = localStorage.getItem('sessionToken');
+    const username = localStorage.getItem('username');
+    
+    if (!token || !username) {
+        showTab('login');
+        return;
+    }
+    
+    updateConnectionStatus('Checking session...');
+    
+    try {
+        const response = await fetch('/api/check-session', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            credentials: 'include'
         });
-
-        // ==================== Audio Context ====================
-        function initAudioContext() {
-            try {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            } catch (e) {
-                console.warn('Web Audio API not supported:', e.message);
-            }
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            currentUser = data.username;
+            sessionToken = data.token;
+            
+            localStorage.setItem('sessionToken', data.token);
+            localStorage.setItem('username', data.username);
+            
+            currentUserSpan.textContent = data.username;
+            authSection.style.display = 'none';
+            profileSection.style.display = 'block';
+            
+            connectSocket();
+            updateConnectionStatus('Connected');
+        } else {
+            localStorage.removeItem('sessionToken');
+            localStorage.removeItem('username');
+            showTab('login');
+            updateConnectionStatus('disconnected');
         }
+    } catch (error) {
+        console.error('Session check error:', error);
+        showTab('login');
+        updateConnectionStatus('disconnected');
+    }
+}
 
-        function playRingtone() {
-            stopRingtone();
-            
-            if (audioContext && audioContext.state === 'suspended') {
-                audioContext.resume();
-            }
-            
-            if (audioContext) {
-                try {
-                    oscillator = audioContext.createOscillator();
-                    const gainNode = audioContext.createGain();
-                    
-                    oscillator.connect(gainNode);
-                    gainNode.connect(audioContext.destination);
-                    
-                    oscillator.type = 'sine';
-                    oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
-                    
-                    gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-                    gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.1);
-                    gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.5);
-                    
-                    oscillator.start();
-                    
-                    const interval = setInterval(() => {
-                        if (oscillator) {
-                            const now = audioContext.currentTime;
-                            gainNode.gain.setValueAtTime(0, now);
-                            gainNode.gain.linearRampToValueAtTime(0.3, now + 0.1);
-                            gainNode.gain.linearRampToValueAtTime(0, now + 0.5);
-                        } else {
-                            clearInterval(interval);
-                        }
-                    }, 1000);
-                    
-                } catch (e) {
-                    console.warn('Error playing ringtone:', e);
-                }
-            }
-            
-            // Vibrate if supported
-            if (navigator.vibrate) {
-                navigator.vibrate([200, 100, 200, 100, 200]);
-            }
+function updateConnectionStatus(status) {
+    connectionStatusDiv.style.display = 'block';
+    connectionDot.className = 'connection-dot ' + status;
+    
+    switch(status) {
+        case 'connected':
+            connectionTextSpan.textContent = 'Connected';
+            connectionStatusDiv.style.background = '#d4edda';
+            connectionStatusDiv.style.color = '#155724';
+            userStatusBadge.textContent = 'Online';
+            userStatusBadge.style.background = 'linear-gradient(135deg, #28a745 0%, #20c997 100%)';
+            break;
+        case 'connecting':
+            connectionTextSpan.textContent = 'Connecting...';
+            connectionStatusDiv.style.background = '#fff3cd';
+            connectionStatusDiv.style.color = '#856404';
+            userStatusBadge.textContent = 'Connecting...';
+            userStatusBadge.style.background = 'linear-gradient(135deg, #ffc107 0%, #ffd257 100%)';
+            break;
+        case 'disconnected':
+            connectionTextSpan.textContent = 'Disconnected';
+            connectionStatusDiv.style.background = '#f8d7da';
+            connectionStatusDiv.style.color = '#721c24';
+            userStatusBadge.textContent = 'Offline';
+            userStatusBadge.style.background = 'linear-gradient(135deg, #dc3545 0%, #e4606d 100%)';
+            break;
+    }
+}
+
+// ==================== UI Helpers ====================
+function showTab(tabName) {
+    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+    
+    document.querySelector(`.tab[onclick="showTab('${tabName}')"]`).classList.add('active');
+    document.getElementById(`${tabName}Tab`).classList.add('active');
+    
+    loginStatus.textContent = '';
+    registerStatus.textContent = '';
+    registerRequired.style.display = 'none';
+}
+
+function showStatus(element, message, type) {
+    element.textContent = message;
+    element.className = `status ${type}`;
+    element.style.display = 'block';
+}
+
+// ==================== Socket.IO ====================
+function connectSocket() {
+    if (socket?.connected) socket.disconnect();
+    
+    socket = io({
+        auth: { token: sessionToken },
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
+    });
+    
+    socket.on('connect', () => {
+        console.log('✅ Socket connected:', socket.id);
+        updateConnectionStatus('connected');
+    });
+    
+    socket.on('connect_error', (error) => {
+        console.error('Socket connection error:', error);
+        updateConnectionStatus('connecting');
+    });
+    
+    socket.on('disconnect', () => {
+        console.log('Socket disconnected');
+        updateConnectionStatus('disconnected');
+    });
+    
+    socket.on('users-update', (users) => {
+        updateUsersList(users);
+        onlineCountSpan.textContent = users.filter(u => u.isOnline).length;
+    });
+    
+    socket.on('call-offer', ({ from, offer, callType }) => {
+        console.log('📞 Incoming call from:', from);
+        
+        if (currentCall) {
+            socket.emit('call-busy', { to: from });
+            return;
         }
-
-        function stopRingtone() {
-            if (oscillator) {
-                oscillator.stop();
-                oscillator = null;
-            }
-            if (navigator.vibrate) {
-                navigator.vibrate(0);
-            }
-        }
-
-        // ==================== Session Management ====================
-        async function checkSession() {
-            // Check localStorage first
-            const token = localStorage.getItem('sessionToken');
-            const username = localStorage.getItem('username');
-            
-            if (!token || !username) {
-                showTab('login');
-                return;
-            }
-            
-            updateConnectionStatus('Checking session...');
-            
-            try {
-                const response = await fetch('/api/check-session', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                    },
-                    credentials: 'include'
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    // Session is valid
-                    currentUser = data.username;
-                    sessionToken = data.token;
-                    
-                    // Update localStorage with fresh token
-                    localStorage.setItem('sessionToken', data.token);
-                    localStorage.setItem('username', data.username);
-                    
-                    // Update UI
-                    currentUserSpan.textContent = data.username;
-                    authSection.style.display = 'none';
-                    profileSection.style.display = 'block';
-                    
-                    // Connect Socket.io
-                    connectSocket();
-                    
-                    updateConnectionStatus('Connected');
-                    console.log('✅ Auto-login successful');
-                } else {
-                    // Session invalid
-                    console.log('Session check failed:', data.message);
-                    localStorage.removeItem('sessionToken');
-                    localStorage.removeItem('username');
-                    showTab('login');
-                    updateConnectionStatus('disconnected');
-                }
-            } catch (error) {
-                console.error('Session check error:', error);
-                // Even if check fails, try to connect anyway with stored credentials
-                if (token && username) {
-                    currentUser = username;
-                    sessionToken = token;
-                    currentUserSpan.textContent = username;
-                    authSection.style.display = 'none';
-                    profileSection.style.display = 'block';
-                    connectSocket();
-                    updateConnectionStatus('Reconnecting...');
-                } else {
-                    showTab('login');
-                    updateConnectionStatus('disconnected');
-                }
-            }
-        }
-
-        function updateConnectionStatus(status) {
-            connectionStatusDiv.style.display = 'block';
-            connectionDot.className = 'connection-dot ' + status;
-            
-            switch(status) {
-                case 'connected':
-                    connectionTextSpan.textContent = 'Connected';
-                    connectionStatusDiv.style.background = '#d4edda';
-                    connectionStatusDiv.style.color = '#155724';
-                    userStatusBadge.textContent = 'Online';
-                    userStatusBadge.style.background = 'linear-gradient(135deg, #28a745 0%, #20c997 100%)';
-                    break;
-                case 'connecting':
-                    connectionTextSpan.textContent = 'Connecting...';
-                    connectionStatusDiv.style.background = '#fff3cd';
-                    connectionStatusDiv.style.color = '#856404';
-                    userStatusBadge.textContent = 'Connecting...';
-                    userStatusBadge.style.background = 'linear-gradient(135deg, #ffc107 0%, #ffd257 100%)';
-                    break;
-                case 'disconnected':
-                    connectionTextSpan.textContent = 'Disconnected';
-                    connectionStatusDiv.style.background = '#f8d7da';
-                    connectionStatusDiv.style.color = '#721c24';
-                    userStatusBadge.textContent = 'Offline';
-                    userStatusBadge.style.background = 'linear-gradient(135deg, #dc3545 0%, #e4606d 100%)';
-                    break;
-            }
-        }
-
-        // ==================== UI Helpers ====================
-        function showTab(tabName) {
-            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-            
-            document.querySelector(`.tab[onclick="showTab('${tabName}')"]`).classList.add('active');
-            document.getElementById(`${tabName}Tab`).classList.add('active');
-            
-            loginStatus.textContent = '';
-            registerStatus.textContent = '';
-            registerRequired.style.display = 'none';
-        }
-
-        function showStatus(element, message, type) {
-            element.textContent = message;
-            element.className = `status ${type}`;
-            element.style.display = 'block';
-        }
-
-        // ==================== Socket.IO ====================
-        function connectSocket() {
-            if (socket?.connected) socket.disconnect();
-            
-            socket = io({
-                auth: {
-                    token: sessionToken,
-                    username: currentUser
-                },
-                reconnection: true,
-                reconnectionAttempts: CONFIG.MAX_RECONNECT_ATTEMPTS,
-                reconnectionDelay: CONFIG.RECONNECT_DELAY,
-                transports: ['websocket', 'polling']
-            });
-            
-            socket.on('connect', () => {
-                console.log('✅ Socket connected:', socket.id);
-                updateConnectionStatus('connected');
-                reconnectAttempts = 0;
-            });
-            
-            socket.on('connect_error', (error) => {
-                console.error('❌ Socket connection error:', error.message);
-                updateConnectionStatus('connecting');
-                reconnectAttempts++;
-                
-                if (reconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) {
-                    showStatus(callStatusDiv, 'Connection failed. Please refresh.', 'error');
-                }
-            });
-            
-            socket.on('disconnect', (reason) => {
-                console.log('❌ Socket disconnected:', reason);
-                updateConnectionStatus('disconnected');
-                
-                if (reason === 'io server disconnect') {
-                    socket.connect();
-                }
-            });
-            
-            socket.on('users-update', (users) => {
-                updateUsersList(users);
-                onlineCountSpan.textContent = users.filter(u => u.isOnline).length;
-            });
-            
-            socket.on('call-offer', ({ from, offer, callType }) => {
-                console.log('📞 Incoming call from:', from);
-                
-                if (currentCall) {
-                    socket.emit('call-busy', { to: from });
-                    return;
-                }
-                
-                incomingCallData = { from, offer, callType };
-                currentCall = from;
-                showIncomingCallModal(from, callType);
-            });
-            
-            socket.on('call-answer', ({ from, answer }) => {
-                console.log('✅ Call answered by:', from);
-                
-                if (peerConnection && peerConnection.signalingState !== 'stable') {
-                    peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
-                        .then(() => {
-                            showStatus(callStatusDiv, `Connected with ${from}`, 'success');
-                            startCallTimer();
-                        })
-                        .catch(console.error);
-                }
-                
-                hideOutgoingCallModal();
-            });
-            
-            socket.on('ice-candidate', ({ candidate }) => {
-                if (peerConnection && peerConnection.remoteDescription) {
-                    peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
-                        .catch(console.error);
-                }
-            });
-            
-            socket.on('call-rejected', ({ from }) => {
-                console.log('❌ Call rejected by:', from);
-                showStatus(callStatusDiv, `${from} rejected the call`, 'error');
-                endCall();
-            });
-            
-            socket.on('call-busy', ({ from }) => {
-                console.log('⏳ User is busy:', from);
-                showStatus(callStatusDiv, `${from} is busy on another call`, 'warning');
-                endCall();
-            });
-            
-            socket.on('call-ended', ({ from, reason }) => {
-                console.log('📴 Call ended by:', from, 'Reason:', reason);
-                showStatus(callStatusDiv, `${from} ended the call${reason ? ' (' + reason + ')' : ''}`, 'info');
-                endCall();
-            });
-            
-            socket.on('call-error', ({ message }) => {
-                showStatus(callStatusDiv, `Call error: ${message}`, 'error');
-                endCall();
-            });
-            
-            socket.on('user-disconnected', ({ username }) => {
-                if (currentCall === username) {
-                    showStatus(callStatusDiv, `${username} disconnected`, 'warning');
+        
+        incomingCallData = { from, offer, callType };
+        currentCall = from;
+        showIncomingCallModal(from, callType);
+    });
+    
+    socket.on('call-answer', ({ from, answer }) => {
+        console.log('✅ Call answered by:', from);
+        
+        if (peerConnection && peerConnection.signalingState !== 'stable') {
+            peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
+                .then(() => {
+                    showStatus(callStatusDiv, `Connected with ${from}`, 'success');
+                    startCallTimer();
+                })
+                .catch(error => {
+                    console.error('Error setting remote description:', error);
                     endCall();
-                }
-            });
+                });
         }
+        
+        hideOutgoingCallModal();
+    });
+    
+    socket.on('ice-candidate', ({ candidate }) => {
+        if (peerConnection && peerConnection.remoteDescription) {
+            peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                .catch(error => console.error('Error adding ICE candidate:', error));
+        }
+    });
+    
+    socket.on('call-rejected', ({ from }) => {
+        console.log('❌ Call rejected by:', from);
+        showStatus(callStatusDiv, `${from} rejected the call`, 'error');
+        endCall();
+    });
+    
+    socket.on('call-busy', ({ from }) => {
+        console.log('⏳ User is busy:', from);
+        showStatus(callStatusDiv, `${from} is busy on another call`, 'warning');
+        endCall();
+    });
+    
+    socket.on('call-ended', ({ from, reason }) => {
+        console.log('📴 Call ended by:', from, 'Reason:', reason);
+        showStatus(callStatusDiv, `${from} ended the call${reason ? ' (' + reason + ')' : ''}`, 'info');
+        endCall();
+    });
+    
+    socket.on('call-error', ({ message }) => {
+        showStatus(callStatusDiv, `Call error: ${message}`, 'error');
+        endCall();
+    });
+    
+    socket.on('user-disconnected', ({ username }) => {
+        if (currentCall === username) {
+            showStatus(callStatusDiv, `${username} disconnected`, 'warning');
+            endCall();
+        }
+    });
+}
 
-        // ==================== User Management ====================
-        async function login() {
-            const username = document.getElementById('loginUsername').value.trim();
-            const password = document.getElementById('loginPassword').value;
+// ==================== User Management ====================
+async function login() {
+    const username = document.getElementById('loginUsername').value.trim();
+    const password = document.getElementById('loginPassword').value;
+    
+    if (!username || !password) {
+        showStatus(loginStatus, 'Please enter username and password', 'error');
+        return;
+    }
+    
+    updateConnectionStatus('connecting');
+    
+    try {
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ username, password })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            localStorage.setItem('sessionToken', data.token);
+            localStorage.setItem('username', data.username);
             
-            if (!username || !password) {
-                showStatus(loginStatus, 'Please enter username and password', 'error');
-                return;
+            sessionToken = data.token;
+            currentUser = data.username;
+            
+            currentUserSpan.textContent = data.username;
+            authSection.style.display = 'none';
+            profileSection.style.display = 'block';
+            
+            connectSocket();
+            
+            document.getElementById('loginUsername').value = '';
+            document.getElementById('loginPassword').value = '';
+            
+            showStatus(loginStatus, 'Login successful', 'success');
+            updateConnectionStatus('connected');
+            
+        } else {
+            if (data.message.includes('not found')) {
+                registerRequired.style.display = 'block';
             }
+            showStatus(loginStatus, data.message, 'error');
+            updateConnectionStatus('disconnected');
+        }
+    } catch (error) {
+        showStatus(loginStatus, 'Login failed', 'error');
+        updateConnectionStatus('disconnected');
+    }
+}
+
+async function register() {
+    const username = document.getElementById('registerUsername').value.trim();
+    const email = document.getElementById('registerEmail').value.trim();
+    const password = document.getElementById('registerPassword').value;
+    const confirmPassword = document.getElementById('confirmPassword').value;
+    
+    if (!username || !password) {
+        showStatus(registerStatus, 'Username and password are required', 'error');
+        return;
+    }
+    
+    if (password !== confirmPassword) {
+        showStatus(registerStatus, 'Passwords do not match', 'error');
+        return;
+    }
+    
+    if (password.length < 6) {
+        showStatus(registerStatus, 'Password must be at least 6 characters', 'error');
+        return;
+    }
+    
+    updateConnectionStatus('connecting');
+    
+    try {
+        const response = await fetch('/api/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, email, password })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showStatus(registerStatus, 'Registration successful! Auto-logging in...', 'success');
             
-            updateConnectionStatus('connecting');
-            
-            try {
-                const response = await fetch('/api/login', {
+            setTimeout(async () => {
+                const loginResponse = await fetch('/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
                     body: JSON.stringify({ username, password })
                 });
                 
-                const data = await response.json();
+                const loginData = await loginResponse.json();
                 
-                if (data.success) {
-                    // Save to localStorage
-                    localStorage.setItem('sessionToken', data.token);
-                    localStorage.setItem('username', data.username);
+                if (loginData.success) {
+                    localStorage.setItem('sessionToken', loginData.token);
+                    localStorage.setItem('username', loginData.username);
                     
-                    // Update state
-                    sessionToken = data.token;
-                    currentUser = data.username;
+                    sessionToken = loginData.token;
+                    currentUser = loginData.username;
                     
-                    // Update UI
-                    currentUserSpan.textContent = data.username;
+                    currentUserSpan.textContent = loginData.username;
                     authSection.style.display = 'none';
                     profileSection.style.display = 'block';
                     
-                    // Connect Socket.io
                     connectSocket();
                     
-                    // Clear form
-                    document.getElementById('loginUsername').value = '';
-                    document.getElementById('loginPassword').value = '';
-                    
-                    showStatus(loginStatus, 'Login successful', 'success');
-                    updateConnectionStatus('connected');
+                    document.getElementById('registerUsername').value = '';
+                    document.getElementById('registerEmail').value = '';
+                    document.getElementById('registerPassword').value = '';
+                    document.getElementById('confirmPassword').value = '';
                     
                 } else {
-                    if (data.message.includes('not found')) {
-                        registerRequired.style.display = 'block';
-                    }
-                    showStatus(loginStatus, data.message, 'error');
-                    updateConnectionStatus('disconnected');
+                    showStatus(registerStatus, 'Auto-login failed. Please login manually.', 'error');
+                    showTab('login');
                 }
-            } catch (error) {
-                showStatus(loginStatus, 'Login failed', 'error');
-                updateConnectionStatus('disconnected');
-            }
-        }
-
-        async function register() {
-            const username = document.getElementById('registerUsername').value.trim();
-            const email = document.getElementById('registerEmail').value.trim();
-            const password = document.getElementById('registerPassword').value;
-            const confirmPassword = document.getElementById('confirmPassword').value;
+            }, 1500);
             
-            if (!username || !password) {
-                showStatus(registerStatus, 'Username and password are required', 'error');
-                return;
-            }
-            
-            if (password !== confirmPassword) {
-                showStatus(registerStatus, 'Passwords do not match', 'error');
-                return;
-            }
-            
-            if (password.length < 6) {
-                showStatus(registerStatus, 'Password must be at least 6 characters', 'error');
-                return;
-            }
-            
-            updateConnectionStatus('connecting');
-            
-            try {
-                const response = await fetch('/api/register', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, email, password })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    showStatus(registerStatus, 'Registration successful! Auto-logging in...', 'success');
-                    
-                    setTimeout(async () => {
-                        const loginResponse = await fetch('/api/login', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'include',
-                            body: JSON.stringify({ username, password })
-                        });
-                        
-                        const loginData = await loginResponse.json();
-                        
-                        if (loginData.success) {
-                            localStorage.setItem('sessionToken', loginData.token);
-                            localStorage.setItem('username', loginData.username);
-                            
-                            sessionToken = loginData.token;
-                            currentUser = loginData.username;
-                            
-                            currentUserSpan.textContent = loginData.username;
-                            authSection.style.display = 'none';
-                            profileSection.style.display = 'block';
-                            
-                            connectSocket();
-                            
-                            document.getElementById('registerUsername').value = '';
-                            document.getElementById('registerEmail').value = '';
-                            document.getElementById('registerPassword').value = '';
-                            document.getElementById('confirmPassword').value = '';
-                            
-                        } else {
-                            showStatus(registerStatus, 'Auto-login failed. Please login manually.', 'error');
-                            showTab('login');
-                        }
-                    }, 1500);
-                    
-                } else {
-                    showStatus(registerStatus, data.message, 'error');
-                    updateConnectionStatus('disconnected');
-                }
-            } catch (error) {
-                showStatus(registerStatus, 'Registration failed', 'error');
-                updateConnectionStatus('disconnected');
-            }
-        }
-
-        function logout() {
-            endCall();
-            
-            if (socket) {
-                socket.disconnect();
-            }
-            
-            fetch('/api/logout', {
-                method: 'POST',
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${sessionToken}`
-                },
-                credentials: 'include'
-            }).catch(console.error);
-            
-            localStorage.removeItem('sessionToken');
-            localStorage.removeItem('username');
-            
-            sessionToken = null;
-            currentUser = null;
-            
-            profileSection.style.display = 'none';
-            videoContainer.style.display = 'none';
-            authSection.style.display = 'block';
-            
-            showTab('login');
+        } else {
+            showStatus(registerStatus, data.message, 'error');
             updateConnectionStatus('disconnected');
         }
+    } catch (error) {
+        showStatus(registerStatus, 'Registration failed', 'error');
+        updateConnectionStatus('disconnected');
+    }
+}
 
-        // ==================== Users List ====================
-        function updateUsersList(users) {
-            usersList.innerHTML = '';
-            
-            users.forEach(user => {
-                if (user.username === currentUser) return;
-                
-                const userCard = document.createElement('div');
-                userCard.className = `user-card ${user.isOnline ? 'online' : ''} ${user.inCall ? 'in-call' : ''}`;
-                
-                userCard.innerHTML = `
-                    <div class="user-info">
-                        <h4>${user.username}</h4>
-                        <div class="user-status">
-                            <div class="status-dot ${user.isOnline ? user.inCall ? 'busy' : 'online' : 'offline'}"></div>
-                            <span>${user.inCall ? 'In a call' : user.isOnline ? 'Online' : 'Offline'}</span>
-                        </div>
-                    </div>
-                    <div class="user-actions">
-                        <button class="btn ${user.inCall ? 'btn-secondary' : 'btn-success'}" 
-                                onclick="startAudioCall('${user.username}')"
-                                ${user.inCall ? 'disabled' : ''}>
-                            ${user.inCall ? 'Busy' : 'Audio Call'}
-                        </button>
-                        <button class="btn ${user.inCall ? 'btn-secondary' : ''}" 
-                                onclick="startVideoCall('${user.username}')"
-                                ${user.inCall ? 'disabled' : ''}>
-                            ${user.inCall ? 'Busy' : 'Video Call'}
-                        </button>
-                    </div>
-                `;
-                
-                usersList.appendChild(userCard);
-            });
-        }
+function logout() {
+    endCall();
+    
+    if (socket) {
+        socket.disconnect();
+    }
+    
+    fetch('/api/logout', {
+        method: 'POST',
+        headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionToken}`
+        },
+        credentials: 'include'
+    }).catch(console.error);
+    
+    localStorage.removeItem('sessionToken');
+    localStorage.removeItem('username');
+    
+    sessionToken = null;
+    currentUser = null;
+    
+    profileSection.style.display = 'none';
+    videoContainer.style.display = 'none';
+    authSection.style.display = 'block';
+    
+    showTab('login');
+    updateConnectionStatus('disconnected');
+}
 
-        // ==================== Call Management ====================
-        async function startAudioCall(targetUser) {
-            await startCall(targetUser, false);
-        }
+// ==================== Users List ====================
+function updateUsersList(users) {
+    usersList.innerHTML = '';
+    
+    users.forEach(user => {
+        if (user.username === currentUser) return;
+        
+        const userCard = document.createElement('div');
+        userCard.className = `user-card ${user.isOnline ? 'online' : ''} ${user.inCall ? 'in-call' : ''}`;
+        
+        userCard.innerHTML = `
+            <div class="user-info">
+                <h4>${user.username}</h4>
+                <div class="user-status">
+                    <div class="status-dot ${user.isOnline ? user.inCall ? 'busy' : 'online' : 'offline'}"></div>
+                    <span>${user.inCall ? 'In a call' : user.isOnline ? 'Online' : 'Offline'}</span>
+                </div>
+            </div>
+            <div class="user-actions">
+                <button class="btn ${user.inCall ? 'btn-secondary' : 'btn-success'}" 
+                        onclick="startAudioCall('${user.username}')"
+                        ${user.inCall ? 'disabled' : ''}>
+                    ${user.inCall ? 'Busy' : 'Audio Call'}
+                </button>
+                <button class="btn ${user.inCall ? 'btn-secondary' : ''}" 
+                        onclick="startVideoCall('${user.username}')"
+                        ${user.inCall ? 'disabled' : ''}>
+                    ${user.inCall ? 'Busy' : 'Video Call'}
+                </button>
+            </div>
+        `;
+        
+        usersList.appendChild(userCard);
+    });
+}
 
-        async function startVideoCall(targetUser) {
-            await startCall(targetUser, true);
-        }
+// ==================== Call Management ====================
+async function startAudioCall(targetUser) {
+    await startCall(targetUser, false);
+}
 
-        async function startCall(targetUser, withVideo) {
+async function startVideoCall(targetUser) {
+    await startCall(targetUser, true);
+}
+
+async function startCall(targetUser, withVideo) {
+    if (currentCall) {
+        showStatus(callStatusDiv, 'You are already in a call', 'error');
+        return;
+    }
+    
+    isCallWithVideo = withVideo;
+    currentCall = targetUser;
+    isCaller = true;
+    
+    try {
+        const constraints = {
+            audio: true,
+            video: withVideo ? {
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            } : false
+        };
+        
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        localVideo.srcObject = localStream;
+        
+        createPeerConnection();
+        localStream.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream);
+        });
+        
+        const offer = await peerConnection.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: withVideo
+        });
+        
+        await peerConnection.setLocalDescription(offer);
+        
+        socket.emit('call-offer', {
+            to: targetUser,
+            offer: offer,
+            callType: withVideo ? 'video' : 'audio'
+        });
+        
+        showOutgoingCallModal(targetUser);
+        callTimeoutId = setTimeout(() => {
             if (currentCall) {
-                showStatus(callStatusDiv, 'You are already in a call', 'error');
-                return;
-            }
-            
-            isCallWithVideo = withVideo;
-            currentCall = targetUser;
-            isCaller = true;
-            
-            try {
-                const constraints = {
-                    audio: true,
-                    video: withVideo ? {
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        frameRate: { ideal: 30 }
-                    } : false
-                };
-                
-                localStream = await navigator.mediaDevices.getUserMedia(constraints);
-                localVideo.srcObject = localStream;
-                
-                createPeerConnection();
-                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-                
-                const offer = await peerConnection.createOffer({
-                    offerToReceiveAudio: true,
-                    offerToReceiveVideo: withVideo
-                });
-                
-                await peerConnection.setLocalDescription(offer);
-                
-                socket.emit('call-offer', {
-                    to: targetUser,
-                    offer: offer,
-                    callType: withVideo ? 'video' : 'audio'
-                });
-                
-                showOutgoingCallModal(targetUser);
-                callTimeoutId = setTimeout(() => {
-                    if (currentCall) {
-                        showStatus(callStatusDiv, 'Call timed out', 'error');
-                        endCall();
-                    }
-                }, CONFIG.CALL_TIMEOUT);
-                
-            } catch (error) {
-                console.error('Error starting call:', error);
-                showStatus(callStatusDiv, `Failed to start call: ${error.message}`, 'error');
+                showStatus(callStatusDiv, 'Call timed out', 'error');
                 endCall();
             }
-        }
+        }, 30000);
+        
+    } catch (error) {
+        console.error('Error starting call:', error);
+        showStatus(callStatusDiv, `Failed to start call: ${error.message}`, 'error');
+        endCall();
+    }
+}
 
-        function createPeerConnection() {
-            peerConnection = new RTCPeerConnection({
-                iceServers: CONFIG.ICE_SERVERS,
-                iceTransportPolicy: 'all',
-                bundlePolicy: 'max-bundle',
-                rtcpMuxPolicy: 'require'
+function createPeerConnection() {
+    peerConnection = new RTCPeerConnection({
+        iceServers: CONFIG.ICE_SERVERS
+    });
+    
+    peerConnection.ontrack = (event) => {
+        console.log('Received remote track');
+        remoteStream = event.streams[0];
+        remoteVideo.srcObject = remoteStream;
+        showStatus(callStatusDiv, 'Connected', 'success');
+        startCallTimer();
+    };
+    
+    peerConnection.onicecandidate = (event) => {
+        if (event.candidate && currentCall) {
+            socket.emit('ice-candidate', {
+                to: currentCall,
+                candidate: event.candidate
             });
-            
-            peerConnection.ontrack = (event) => {
-                remoteStream = event.streams[0];
-                remoteVideo.srcObject = remoteStream;
-                showStatus(callStatusDiv, 'Connected', 'success');
-                startCallTimer();
-            };
-            
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate && currentCall) {
-                    socket.emit('ice-candidate', {
-                        to: currentCall,
-                        candidate: event.candidate
-                    });
-                }
-            };
-            
-            peerConnection.oniceconnectionstatechange = () => {
-                console.log('ICE connection state:', peerConnection.iceConnectionState);
-                
-                switch(peerConnection.iceConnectionState) {
-                    case 'failed':
-                    case 'disconnected':
-                        showStatus(callStatusDiv, 'Connection lost', 'warning');
-                        break;
-                    case 'closed':
-                        endCall();
-                        break;
-                }
-            };
-            
-            peerConnection.onconnectionstatechange = () => {
-                console.log('Connection state:', peerConnection.connectionState);
-            };
-            
-            peerConnection.onsignalingstatechange = () => {
-                console.log('Signaling state:', peerConnection.signalingState);
-            };
         }
-
-        // ==================== Modal Management ====================
-        function showIncomingCallModal(caller, callType) {
-            callerNameSpan.textContent = caller;
-            document.getElementById('callType').textContent = callType === 'video' ? 'Video Call' : 'Audio Call';
-            
-            playRingtone();
-            incomingCallModal.style.display = 'flex';
-            
-            let timeLeft = 30;
-            ringTimerSpan.textContent = timeLeft;
-            
-            ringTimerInterval = setInterval(() => {
-                timeLeft--;
-                ringTimerSpan.textContent = timeLeft;
-                
-                if (timeLeft <= 0) {
-                    rejectIncomingCall();
-                }
-            }, 1000);
-            
-            ringTimeoutId = setTimeout(rejectIncomingCall, CONFIG.RING_TIMEOUT);
-        }
-
-        function hideIncomingCallModal() {
-            incomingCallModal.style.display = 'none';
-            stopRingtone();
-            clearInterval(ringTimerInterval);
-            clearTimeout(ringTimeoutId);
-            ringTimerInterval = null;
-            ringTimeoutId = null;
-        }
-
-        function showOutgoingCallModal(callee) {
-            calleeNameSpan.textContent = callee;
-            outgoingCallModal.style.display = 'flex';
-        }
-
-        function hideOutgoingCallModal() {
-            outgoingCallModal.style.display = 'none';
-        }
-
-        async function acceptIncomingCall() {
-            if (!incomingCallData) return;
-            
-            const { from, offer, callType } = incomingCallData;
-            isCallWithVideo = callType === 'video';
-            
-            hideIncomingCallModal();
-            
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: true,
-                    video: isCallWithVideo
-                });
-                localVideo.srcObject = localStream;
-                
-                createPeerConnection();
-                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-                
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-                const answer = await peerConnection.createAnswer();
-                await peerConnection.setLocalDescription(answer);
-                
-                socket.emit('call-answer', {
-                    to: from,
-                    answer: answer
-                });
-                
-                profileSection.style.display = 'none';
-                videoContainer.style.display = 'block';
-                remoteUserNameSpan.textContent = from;
-                showStatus(callStatusDiv, 'Call connected', 'success');
-                
-            } catch (error) {
-                console.error('Error accepting call:', error);
-                showStatus(callStatusDiv, `Failed to accept call: ${error.message}`, 'error');
-                endCall();
-            }
-        }
-
-        function rejectIncomingCall() {
-            if (!incomingCallData) return;
-            
-            const { from } = incomingCallData;
-            socket.emit('call-rejected', { to: from });
-            
-            hideIncomingCallModal();
-            incomingCallData = null;
-            currentCall = null;
-        }
-
-        function cancelOutgoingCall() {
-            if (currentCall) {
-                socket.emit('call-ended', { to: currentCall });
-            }
-            hideOutgoingCallModal();
+    };
+    
+    peerConnection.oniceconnectionstatechange = () => {
+        console.log('ICE connection state:', peerConnection.iceConnectionState);
+    };
+    
+    peerConnection.onconnectionstatechange = () => {
+        console.log('Connection state:', peerConnection.connectionState);
+        
+        if (peerConnection.connectionState === 'connected') {
+            showStatus(callStatusDiv, 'Connected', 'success');
+        } else if (peerConnection.connectionState === 'disconnected' || 
+                   peerConnection.connectionState === 'failed' ||
+                   peerConnection.connectionState === 'closed') {
+            console.log('Connection lost, ending call');
             endCall();
         }
+    };
+    
+    peerConnection.onsignalingstatechange = () => {
+        console.log('Signaling state:', peerConnection.signalingState);
+    };
+}
 
-        // ==================== Call Controls ====================
-        function endCall() {
-            console.log('Ending call');
+// ==================== Modal Management ====================
+function showIncomingCallModal(caller, callType) {
+    callerNameSpan.textContent = caller;
+    document.getElementById('callType').textContent = callType === 'video' ? 'Video Call' : 'Audio Call';
+    
+    playRingtone();
+    incomingCallModal.style.display = 'flex';
+    
+    let timeLeft = 30;
+    ringTimerSpan.textContent = timeLeft;
+    
+    ringTimerInterval = setInterval(() => {
+        timeLeft--;
+        ringTimerSpan.textContent = timeLeft;
+        
+        if (timeLeft <= 0) {
+            rejectIncomingCall();
+        }
+    }, 1000);
+    
+    ringTimeoutId = setTimeout(rejectIncomingCall, 30000);
+}
+
+function hideIncomingCallModal() {
+    incomingCallModal.style.display = 'none';
+    stopRingtone();
+    clearInterval(ringTimerInterval);
+    clearTimeout(ringTimeoutId);
+    ringTimerInterval = null;
+    ringTimeoutId = null;
+}
+
+function showOutgoingCallModal(callee) {
+    calleeNameSpan.textContent = callee;
+    outgoingCallModal.style.display = 'flex';
+}
+
+function hideOutgoingCallModal() {
+    outgoingCallModal.style.display = 'none';
+}
+
+async function acceptIncomingCall() {
+    if (!incomingCallData) return;
+    
+    hideIncomingCallModal();
+    
+    const { from, offer, callType } = incomingCallData;
+    isCallWithVideo = callType === 'video';
+    currentCall = from;
+    isCaller = false;
+    
+    try {
+        const constraints = {
+            audio: true,
+            video: isCallWithVideo
+        };
+        
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        localVideo.srcObject = localStream;
+        
+        createPeerConnection();
+        localStream.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream);
+        });
+        
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        
+        socket.emit('call-answer', {
+            to: from,
+            answer: answer
+        });
+        
+        profileSection.style.display = 'none';
+        videoContainer.style.display = 'block';
+        remoteUserNameSpan.textContent = from;
+        showStatus(callStatusDiv, 'Call connected', 'success');
+        
+    } catch (error) {
+        console.error('Error accepting call:', error);
+        showStatus(callStatusDiv, `Failed to accept call: ${error.message}`, 'error');
+        endCall();
+    }
+}
+
+function rejectIncomingCall() {
+    if (!incomingCallData) return;
+    
+    const { from } = incomingCallData;
+    socket.emit('call-rejected', { to: from });
+    
+    hideIncomingCallModal();
+    incomingCallData = null;
+    currentCall = null;
+}
+
+function cancelOutgoingCall() {
+    if (currentCall) {
+        socket.emit('call-ended', { to: currentCall });
+    }
+    hideOutgoingCallModal();
+    endCall();
+}
+
+// ==================== Call Controls ====================
+function endCall() {
+    console.log('Ending call');
+    
+    stopRingtone();
+    hideIncomingCallModal();
+    hideOutgoingCallModal();
+    
+    if (currentCall && socket) {
+        socket.emit('call-ended', { to: currentCall });
+    }
+    
+    if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+    }
+    
+    if (remoteStream) {
+        remoteStream.getTracks().forEach(track => track.stop());
+        remoteStream = null;
+    }
+    
+    if (screenStream) {
+        screenStream.getTracks().forEach(track => track.stop());
+        screenStream = null;
+    }
+    
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+    
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
+    currentCall = null;
+    isCaller = false;
+    incomingCallData = null;
+    clearTimeout(callTimeoutId);
+    stopCallTimer();
+    
+    videoContainer.style.display = 'none';
+    profileSection.style.display = 'block';
+    callStatusDiv.textContent = '';
+    callStatusDiv.className = 'status';
+}
+
+function toggleAudio() {
+    if (localStream) {
+        const audioTrack = localStream.getAudioTracks()[0];
+        if (audioTrack) {
+            isAudioEnabled = !audioTrack.enabled;
+            audioTrack.enabled = isAudioEnabled;
             
-            stopRingtone();
-            hideIncomingCallModal();
-            hideOutgoingCallModal();
+            const btn = document.getElementById('toggleAudioBtn');
+            btn.classList.toggle('active', isAudioEnabled);
+            btn.innerHTML = isAudioEnabled ? '🔊' : '🔇';
+        }
+    }
+}
+
+function toggleVideo() {
+    if (localStream) {
+        const videoTrack = localStream.getVideoTracks()[0];
+        if (videoTrack) {
+            isVideoEnabled = !videoTrack.enabled;
+            videoTrack.enabled = isVideoEnabled;
             
-            if (currentCall && socket) {
-                socket.emit('call-ended', { to: currentCall });
+            const btn = document.getElementById('toggleVideoBtn');
+            btn.classList.toggle('active', isVideoEnabled);
+            btn.innerHTML = isVideoEnabled ? '📹' : '📵';
+        }
+    }
+}
+
+async function toggleScreenShare() {
+    try {
+        if (!isScreenSharing) {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({
+                video: true
+            });
+            
+            const videoTrack = screenStream.getVideoTracks()[0];
+            const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
+            
+            if (sender) {
+                sender.replaceTrack(videoTrack);
+                localVideo.srcObject = screenStream;
+                isScreenSharing = true;
+                
+                videoTrack.onended = () => toggleScreenShare();
             }
+        } else {
+            const videoTrack = localStream.getVideoTracks()[0];
+            const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
             
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-                localStream = null;
-            }
-            
-            if (remoteStream) {
-                remoteStream.getTracks().forEach(track => track.stop());
-                remoteStream = null;
-            }
-            
-            if (screenStream) {
+            if (sender && videoTrack) {
+                sender.replaceTrack(videoTrack);
+                localVideo.srcObject = localStream;
+                isScreenSharing = false;
+                
                 screenStream.getTracks().forEach(track => track.stop());
                 screenStream = null;
             }
-            
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
-            }
-            
-            localVideo.srcObject = null;
-            remoteVideo.srcObject = null;
-            currentCall = null;
-            isCaller = false;
-            incomingCallData = null;
-            outgoingCallData = null;
-            clearTimeout(callTimeoutId);
-            stopCallTimer();
-            
-            videoContainer.style.display = 'none';
-            profileSection.style.display = 'block';
-            callStatusDiv.textContent = '';
-            callStatusDiv.className = 'status';
-            
-            document.getElementById('toggleAudioBtn').classList.add('active');
-            document.getElementById('toggleVideoBtn').classList.add('active');
-            isAudioEnabled = true;
-            isVideoEnabled = true;
-            isScreenSharing = false;
         }
+    } catch (error) {
+        console.error('Screen share error:', error);
+    }
+}
 
-        function toggleAudio() {
-            if (localStream) {
-                const audioTrack = localStream.getAudioTracks()[0];
-                if (audioTrack) {
-                    isAudioEnabled = !audioTrack.enabled;
-                    audioTrack.enabled = isAudioEnabled;
-                    
-                    const btn = document.getElementById('toggleAudioBtn');
-                    btn.classList.toggle('active', isAudioEnabled);
-                    btn.innerHTML = isAudioEnabled ? '🔊' : '🔇';
-                    btn.title = isAudioEnabled ? 'Mute' : 'Unmute';
-                }
-            }
+function toggleFullscreen() {
+    const container = document.querySelector('.container');
+    
+    if (!isFullscreen) {
+        if (container.requestFullscreen) {
+            container.requestFullscreen();
         }
-
-        function toggleVideo() {
-            if (localStream) {
-                const videoTrack = localStream.getVideoTracks()[0];
-                if (videoTrack) {
-                    isVideoEnabled = !videoTrack.enabled;
-                    videoTrack.enabled = isVideoEnabled;
-                    
-                    const btn = document.getElementById('toggleVideoBtn');
-                    btn.classList.toggle('active', isVideoEnabled);
-                    btn.innerHTML = isVideoEnabled ? '📹' : '📵';
-                    btn.title = isVideoEnabled ? 'Turn off video' : 'Turn on video';
-                }
-            }
+        isFullscreen = true;
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
         }
+        isFullscreen = false;
+    }
+}
 
-        async function toggleScreenShare() {
-            try {
-                if (!isScreenSharing) {
-                    screenStream = await navigator.mediaDevices.getDisplayMedia({
-                        video: true,
-                        audio: false
-                    });
-                    
-                    const videoTrack = screenStream.getVideoTracks()[0];
-                    const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
-                    
-                    if (sender) {
-                        sender.replaceTrack(videoTrack);
-                        localVideo.srcObject = screenStream;
-                        isScreenSharing = true;
-                        
-                        videoTrack.onended = () => toggleScreenShare();
-                        
-                        const btn = document.getElementById('screenShareBtn');
-                        btn.classList.add('active');
-                        btn.innerHTML = '🖥️';
-                        btn.title = 'Stop sharing';
-                    }
-                } else {
-                    const videoTrack = localStream.getVideoTracks()[0];
-                    const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
-                    
-                    if (sender && videoTrack) {
-                        sender.replaceTrack(videoTrack);
-                        localVideo.srcObject = localStream;
-                        isScreenSharing = false;
-                        
-                        screenStream.getTracks().forEach(track => track.stop());
-                        screenStream = null;
-                        
-                        const btn = document.getElementById('screenShareBtn');
-                        btn.classList.remove('active');
-                        btn.innerHTML = '🖥️';
-                        btn.title = 'Share screen';
-                    }
-                }
-            } catch (error) {
-                console.error('Screen share error:', error);
-            }
-        }
+// ==================== Call Timer ====================
+function startCallTimer() {
+    callStartTime = Date.now();
+    callTimerInterval = setInterval(updateCallTimer, 1000);
+}
 
-        function toggleFullscreen() {
-            const container = document.querySelector('.container');
-            
-            if (!isFullscreen) {
-                if (container.requestFullscreen) {
-                    container.requestFullscreen();
-                } else if (container.webkitRequestFullscreen) {
-                    container.webkitRequestFullscreen();
-                }
-                isFullscreen = true;
-            } else {
-                if (document.exitFullscreen) {
-                    document.exitFullscreen();
-                } else if (document.webkitExitFullscreen) {
-                    document.webkitExitFullscreen();
-                }
-                isFullscreen = false;
-            }
-        }
+function updateCallTimer() {
+    if (!callStartTime) return;
+    
+    const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
+    const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
+    const seconds = (elapsed % 60).toString().padStart(2, '0');
+    callDurationSpan.textContent = `${minutes}:${seconds}`;
+}
 
-        // ==================== Call Timer ====================
-        function startCallTimer() {
-            callStartTime = Date.now();
-            callTimerInterval = setInterval(updateCallTimer, 1000);
-        }
+function stopCallTimer() {
+    clearInterval(callTimerInterval);
+    callTimerInterval = null;
+    callStartTime = null;
+    callDurationSpan.textContent = '00:00';
+}
 
-        function updateCallTimer() {
-            if (!callStartTime) return;
-            
-            const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
-            const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
-            const seconds = (elapsed % 60).toString().padStart(2, '0');
-            callDurationSpan.textContent = `${minutes}:${seconds}`;
-        }
-
-        function stopCallTimer() {
-            clearInterval(callTimerInterval);
-            callTimerInterval = null;
-            callStartTime = null;
-            callDurationSpan.textContent = '00:00';
-        }
-
-        // Fullscreen change event
-        document.addEventListener('fullscreenchange', () => {
-            isFullscreen = !!document.fullscreenElement;
-        });
+// Fullscreen change event
+document.addEventListener('fullscreenchange', () => {
+    isFullscreen = !!document.fullscreenElement;
+});
     </script>
 </body>
 </html>
