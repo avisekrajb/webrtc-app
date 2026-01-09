@@ -858,15 +858,24 @@
 
         // ==================== Initialization ====================
         document.addEventListener('DOMContentLoaded', () => {
+            console.log('🌐 WebRTC Video Call Application');
+            console.log('🔧 ICE Servers configured:', CONFIG.ICE_SERVERS.length);
+            console.log('📡 HTTPS Support:', window.location.protocol === 'https:');
+            console.log('🔒 Secure Context:', window.isSecureContext);
+            
             checkSession();
             initAudioContext();
             updateConnectionStatus('disconnected');
             
             // Show connection info
-            console.log('🌐 WebRTC Video Call Application');
-            console.log('🔧 ICE Servers configured:', CONFIG.ICE_SERVERS.length);
-            console.log('📡 HTTPS Support:', window.location.protocol === 'https:');
-            console.log('🔒 Secure Context:', window.isSecureContext);
+            console.log('Server URL:', window.location.origin);
+            console.log('WebSocket URL:', window.location.origin.replace('http', 'ws'));
+            
+            if (window.location.protocol === 'https:') {
+                console.log('✅ HTTPS detected - WebRTC will work properly');
+            } else {
+                console.warn('⚠️ HTTP detected - Some features may not work without HTTPS');
+            }
         });
 
         // ==================== Audio Context ====================
@@ -935,51 +944,75 @@
         }
 
         // ==================== Session Management ====================
-     // Fix the checkSession function
-async function checkSession() {
-    const token = localStorage.getItem('sessionToken');
-    const username = localStorage.getItem('username');
-    
-    if (token && username) {
-        updateConnectionStatus('Checking session...');
-        try {
-            const response = await fetch('/api/check-session', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                credentials: 'include' // Important for cookies
-            });
+        async function checkSession() {
+            // Check localStorage first
+            const token = localStorage.getItem('sessionToken');
+            const username = localStorage.getItem('username');
             
-            const data = await response.json();
-            
-            if (data.success) {
-                // Session valid
-                currentUser = username;
-                sessionToken = token;
-                currentUserSpan.textContent = username;
-                authSection.style.display = 'none';
-                profileSection.style.display = 'block';
-                connectSocket();
-                updateConnectionStatus('Connected');
-            } else {
-                // Session invalid, clear storage
-                localStorage.removeItem('sessionToken');
-                localStorage.removeItem('username');
+            if (!token || !username) {
                 showTab('login');
-                updateConnectionStatus('disconnected');
+                return;
             }
-        } catch (error) {
-            console.error('Session check failed:', error);
-            // Even if check fails, try to connect anyway
-            showTab('login');
-            updateConnectionStatus('disconnected');
+            
+            updateConnectionStatus('Checking session...');
+            
+            try {
+                const response = await fetch('/api/check-session', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    credentials: 'include'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Session is valid
+                    currentUser = data.username;
+                    sessionToken = data.token;
+                    
+                    // Update localStorage with fresh token
+                    localStorage.setItem('sessionToken', data.token);
+                    localStorage.setItem('username', data.username);
+                    
+                    // Update UI
+                    currentUserSpan.textContent = data.username;
+                    authSection.style.display = 'none';
+                    profileSection.style.display = 'block';
+                    
+                    // Connect Socket.io
+                    connectSocket();
+                    
+                    updateConnectionStatus('Connected');
+                    console.log('✅ Auto-login successful');
+                } else {
+                    // Session invalid
+                    console.log('Session check failed:', data.message);
+                    localStorage.removeItem('sessionToken');
+                    localStorage.removeItem('username');
+                    showTab('login');
+                    updateConnectionStatus('disconnected');
+                }
+            } catch (error) {
+                console.error('Session check error:', error);
+                // Even if check fails, try to connect anyway with stored credentials
+                if (token && username) {
+                    currentUser = username;
+                    sessionToken = token;
+                    currentUserSpan.textContent = username;
+                    authSection.style.display = 'none';
+                    profileSection.style.display = 'block';
+                    connectSocket();
+                    updateConnectionStatus('Reconnecting...');
+                } else {
+                    showTab('login');
+                    updateConnectionStatus('disconnected');
+                }
+            }
         }
-    } else {
-        showTab('login');
-    }
-}
+
         function updateConnectionStatus(status) {
             connectionStatusDiv.style.display = 'block';
             connectionDot.className = 'connection-dot ' + status;
@@ -1033,25 +1066,24 @@ async function checkSession() {
             if (socket?.connected) socket.disconnect();
             
             socket = io({
-                auth: { token: sessionToken },
+                auth: {
+                    token: sessionToken,
+                    username: currentUser
+                },
                 reconnection: true,
                 reconnectionAttempts: CONFIG.MAX_RECONNECT_ATTEMPTS,
-                reconnectionDelay: CONFIG.RECONNECT_DELAY
+                reconnectionDelay: CONFIG.RECONNECT_DELAY,
+                transports: ['websocket', 'polling']
             });
             
             socket.on('connect', () => {
                 console.log('✅ Socket connected:', socket.id);
                 updateConnectionStatus('connected');
                 reconnectAttempts = 0;
-                
-                socket.emit('user-connected', {
-                    username: currentUser,
-                    token: sessionToken
-                });
             });
             
             socket.on('connect_error', (error) => {
-                console.error('❌ Socket connection error:', error);
+                console.error('❌ Socket connection error:', error.message);
                 updateConnectionStatus('connecting');
                 reconnectAttempts++;
                 
@@ -1163,21 +1195,28 @@ async function checkSession() {
                 const data = await response.json();
                 
                 if (data.success) {
-                    sessionToken = data.token;
-                    currentUser = data.username;
-                    
+                    // Save to localStorage
                     localStorage.setItem('sessionToken', data.token);
                     localStorage.setItem('username', data.username);
                     
+                    // Update state
+                    sessionToken = data.token;
+                    currentUser = data.username;
+                    
+                    // Update UI
                     currentUserSpan.textContent = data.username;
                     authSection.style.display = 'none';
                     profileSection.style.display = 'block';
                     
+                    // Connect Socket.io
                     connectSocket();
-                    showStatus(loginStatus, 'Login successful', 'success');
                     
+                    // Clear form
                     document.getElementById('loginUsername').value = '';
                     document.getElementById('loginPassword').value = '';
+                    
+                    showStatus(loginStatus, 'Login successful', 'success');
+                    updateConnectionStatus('connected');
                     
                 } else {
                     if (data.message.includes('not found')) {
@@ -1238,11 +1277,11 @@ async function checkSession() {
                         const loginData = await loginResponse.json();
                         
                         if (loginData.success) {
-                            sessionToken = loginData.token;
-                            currentUser = loginData.username;
-                            
                             localStorage.setItem('sessionToken', loginData.token);
                             localStorage.setItem('username', loginData.username);
+                            
+                            sessionToken = loginData.token;
+                            currentUser = loginData.username;
                             
                             currentUserSpan.textContent = loginData.username;
                             authSection.style.display = 'none';
@@ -1280,14 +1319,18 @@ async function checkSession() {
             
             fetch('/api/logout', {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${sessionToken}` },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${sessionToken}`
+                },
                 credentials: 'include'
             }).catch(console.error);
             
-            sessionToken = null;
-            currentUser = null;
             localStorage.removeItem('sessionToken');
             localStorage.removeItem('username');
+            
+            sessionToken = null;
+            currentUser = null;
             
             profileSection.style.display = 'none';
             videoContainer.style.display = 'none';
@@ -1484,7 +1527,7 @@ async function checkSession() {
             outgoingCallModal.style.display = 'none';
         }
 
-        function acceptIncomingCall() {
+        async function acceptIncomingCall() {
             if (!incomingCallData) return;
             
             const { from, offer, callType } = incomingCallData;
@@ -1492,29 +1535,23 @@ async function checkSession() {
             
             hideIncomingCallModal();
             
-            navigator.mediaDevices.getUserMedia({
-                audio: true,
-                video: isCallWithVideo ? {
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 },
-                    frameRate: { ideal: 30 }
-                } : false
-            }).then(stream => {
-                localStream = stream;
-                localVideo.srcObject = stream;
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: isCallWithVideo
+                });
+                localVideo.srcObject = localStream;
                 
                 createPeerConnection();
-                stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
                 
-                return peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-            }).then(() => {
-                return peerConnection.createAnswer();
-            }).then(answer => {
-                return peerConnection.setLocalDescription(answer);
-            }).then(() => {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                
                 socket.emit('call-answer', {
                     to: from,
-                    answer: peerConnection.localDescription
+                    answer: answer
                 });
                 
                 profileSection.style.display = 'none';
@@ -1522,11 +1559,11 @@ async function checkSession() {
                 remoteUserNameSpan.textContent = from;
                 showStatus(callStatusDiv, 'Call connected', 'success');
                 
-            }).catch(error => {
+            } catch (error) {
                 console.error('Error accepting call:', error);
                 showStatus(callStatusDiv, `Failed to accept call: ${error.message}`, 'error');
                 endCall();
-            });
+            }
         }
 
         function rejectIncomingCall() {
@@ -1718,18 +1755,6 @@ async function checkSession() {
             callStartTime = null;
             callDurationSpan.textContent = '00:00';
         }
-
-        // ==================== Network Info ====================
-        window.addEventListener('load', () => {
-            console.log('Server URL:', window.location.origin);
-            console.log('WebSocket URL:', window.location.origin.replace('http', 'ws'));
-            
-            if (window.location.protocol === 'https:') {
-                console.log('✅ HTTPS detected - WebRTC will work properly');
-            } else {
-                console.warn('⚠️ HTTP detected - Some features may not work without HTTPS');
-            }
-        });
 
         // Fullscreen change event
         document.addEventListener('fullscreenchange', () => {
